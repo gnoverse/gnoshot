@@ -160,11 +160,25 @@ outright when none is configured.
 
 ## Cost
 
-Measured: a capture is ~0.6 s at 4 workers and ~1.5 s at one; a browser launch
-is ~450 ms and happens once per worker. RAM is the constraint, not CPU: roughly
-1.3 GB per worker. A full cold build of mainnet's ~350 paths is minutes, and
-steady state is on the order of a minute of Chrome per day. Storage is ~300 KB
-per path all in.
+Chrome is the part everyone expects to be slow and it is not. Measured on the
+deployment box, 2026-09-22, `/r/gov/dao` render only: **4.6 s end to end**, of
+which the capture is 0.8 s and a browser launch is ~0.5 s and happens once per
+worker. The rest is WebP.
+
+That is why **the sweep captures the render and not the page**. The page master
+is 2560x3254 against the render's 1632x2714, nothing derives a rung from it, and
+the pixel count is the whole cost. A page master is captured when somebody
+actually asks for one, and one already on disk survives a render-only refresh.
+
+Two things that are not levers, both measured rather than assumed:
+
+- **Encoder effort.** Methods 1 through 6 produce byte-identical output on the
+  same image, within 0.93 to 1.23 s. Only method 0 differs, at 7.7x the bytes.
+- **Lossy for the page master.** 261,280 bytes at q90 against 150,064 lossless
+  on the same page. The rule only inverts below native resolution.
+
+RAM is the constraint rather than CPU: roughly 1.3 GB per worker. Storage is
+~300 KB per path with both masters, ~180 KB with the render alone.
 
 Two workers on a box that already runs something else is the right size.
 

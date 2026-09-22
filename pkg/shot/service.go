@@ -56,6 +56,11 @@ func (c *Config) Defaults() {
 type job struct {
 	url   string
 	theme Theme
+	// modes is what this job should capture. The sweep asks for the render
+	// only: it is the one every rung is derived from, and it is 2.4x fewer
+	// pixels than the page, which is the whole cost of a capture. The page
+	// master is captured when somebody actually asks for one.
+	modes []Mode
 }
 
 // Service owns the store, the queue and the browsers.
@@ -118,7 +123,10 @@ func (s *Service) Run(ctx context.Context) error {
 //
 // Fifty simultaneous requests for a cold realm are one capture, not fifty: the
 // dedupe is the difference between a link going viral and the box falling over.
-func (s *Service) Enqueue(url string, theme Theme, interactive bool) bool {
+func (s *Service) Enqueue(url string, theme Theme, interactive bool, modes ...Mode) bool {
+	if len(modes) == 0 {
+		modes = []Mode{ModeRender}
+	}
 	k := Key(url, theme)
 	s.mu.Lock()
 	if s.inFlight[k] {
@@ -133,7 +141,7 @@ func (s *Service) Enqueue(url string, theme Theme, interactive bool) bool {
 		q = s.interactive
 	}
 	select {
-	case q <- job{url: url, theme: theme}:
+	case q <- job{url: url, theme: theme, modes: modes}:
 		return true
 	default:
 		s.mu.Lock()
@@ -177,7 +185,7 @@ func (s *Service) worker(ctx context.Context, n int) {
 				continue
 			}
 		}
-		if err := s.Refresh(ctx, br, j.url, j.theme); err != nil {
+		if err := s.Refresh(ctx, br, j.url, j.theme, j.modes...); err != nil {
 			log.Printf("worker %d: %s: %v", n, j.url, err)
 		}
 		s.done(j)
@@ -193,7 +201,10 @@ func (s *Service) done(j job) {
 // Refresh probes a URL and captures it if the probe says anything changed. It
 // is the whole pipeline, and the CLI runs the identical code path so the
 // service is not the only way to reproduce a capture.
-func (s *Service) Refresh(ctx context.Context, br *Browser, pageURL string, theme Theme) error {
+func (s *Service) Refresh(ctx context.Context, br *Browser, pageURL string, theme Theme, modes ...Mode) error {
+	if len(modes) == 0 {
+		modes = []Mode{ModeRender}
+	}
 	p, err := DoProbe(ctx, s.probe, pageURL)
 	if err != nil {
 		return fmt.Errorf("probe: %w", err)
@@ -203,8 +214,9 @@ func (s *Service) Refresh(ctx context.Context, br *Browser, pageURL string, them
 	if err != nil {
 		return err
 	}
-	if prev != nil && prev.Freshness == p.Freshness && prev.Object != "" {
-		// Unchanged. This is the common case and it costs one UPDATE.
+	if prev != nil && prev.Freshness == p.Freshness && prev.Object != "" && hasModes(prev, modes) {
+		// Unchanged, and already carrying everything this job asked for. This
+		// is the common case and it costs one UPDATE.
 		return s.store.Touch(pageURL, theme, now)
 	}
 
@@ -227,7 +239,12 @@ func (s *Service) Refresh(ctx context.Context, br *Browser, pageURL string, them
 		return s.store.Put(e)
 	}
 
-	res, err := br.Capture(ctx, pageURL, theme, []Mode{ModeRender, ModePage})
+	// Whatever was already captured for this generation is kept: a page master
+	// taken earlier must not be thrown away by a render-only sweep.
+	if prev != nil && prev.Freshness == p.Freshness {
+		modes = union(modes, capturedModes(prev))
+	}
+	res, err := br.Capture(ctx, pageURL, theme, modes)
 	if err != nil {
 		return fmt.Errorf("capture: %w", err)
 	}
@@ -239,7 +256,7 @@ func (s *Service) Refresh(ctx context.Context, br *Browser, pageURL string, them
 
 	obj := ObjectKey(pageURL, theme, p.Freshness)
 	for mode, m := range res.Masters {
-		b, err := EncodeMaster(m.Img)
+		b, err := EncodeMaster(m.Img, mode)
 		if err != nil {
 			return err
 		}
@@ -291,12 +308,12 @@ func (s *Service) Serve(pageURL string, theme Theme, mode Mode, r Rung) (body []
 		log.Printf("lookup %s: %v", pageURL, err)
 	}
 	if e == nil {
-		s.Enqueue(pageURL, theme, true)
+		s.Enqueue(pageURL, theme, true, mode)
 		b, _ := EncodeTile(pathOf(pageURL), TileNone, r)
 		return b, nil, http.StatusAccepted
 	}
 	if time.Since(e.ProbedAt) > s.refreshAfter(e) {
-		s.Enqueue(pageURL, theme, false)
+		s.Enqueue(pageURL, theme, false, mode)
 	}
 	if e.Object == "" {
 		b, _ := EncodeTile(pathOf(pageURL), TileKindFor(e.Matched, e.State), r)
@@ -308,9 +325,10 @@ func (s *Service) Serve(pageURL string, theme Theme, mode Mode, r Rung) (body []
 	}
 	b, err := s.store.ReadFile(e.Object, name)
 	if err != nil {
-		// The manifest says there is an image and the disk disagrees. Re-capture
-		// rather than 500: the reader gets a tile now and a picture next time.
-		s.Enqueue(pageURL, theme, true)
+		// Either the manifest says there is an image and the disk disagrees, or
+		// this is the first request for a page master the sweep never took.
+		// Both are answered the same way: a tile now, a picture next time.
+		s.Enqueue(pageURL, theme, true, mode)
 		tb, _ := EncodeTile(pathOf(pageURL), TileNone, r)
 		return tb, e, http.StatusAccepted
 	}
@@ -325,4 +343,39 @@ func (s *Service) refreshAfter(e *Entry) time.Duration {
 		return ttl
 	}
 	return s.cfg.RefreshAfter
+}
+
+// hasModes reports whether an entry already carries a master for every mode.
+func hasModes(e *Entry, modes []Mode) bool {
+	for _, m := range modes {
+		// The render is absent by design on a directory or status page, and
+		// asking for it again would re-capture those on every read.
+		if m == ModeRender && e.Matched != MatchedRealm && e.Matched != MatchedReadme {
+			continue
+		}
+		if e.Modes[string(m)] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func capturedModes(e *Entry) []Mode {
+	out := make([]Mode, 0, len(e.Modes))
+	for m := range e.Modes {
+		out = append(out, Mode(m))
+	}
+	return out
+}
+
+func union(a, b []Mode) []Mode {
+	seen := map[Mode]bool{}
+	out := make([]Mode, 0, len(a)+len(b))
+	for _, m := range append(append([]Mode{}, a...), b...) {
+		if !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
 }

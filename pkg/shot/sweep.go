@@ -72,7 +72,7 @@ func (s *Service) sweepOnce(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			if s.Enqueue(u, ThemeLight, false) {
+			if s.Enqueue(u, ThemeLight, false, ModeRender) {
 				n++
 			}
 		}
@@ -82,7 +82,7 @@ func (s *Service) sweepOnce(ctx context.Context) {
 		log.Printf("sweep: stale: %v", err)
 	}
 	for _, u := range stale {
-		if s.Enqueue(u, ThemeLight, false) {
+		if s.Enqueue(u, ThemeLight, false, ModeRender) {
 			n++
 		}
 	}

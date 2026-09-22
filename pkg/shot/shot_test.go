@@ -536,3 +536,69 @@ func TestServerTileServesEveryKind(t *testing.T) {
 }
 
 func stringsReader(s string) io.Reader { return strings.NewReader(s) }
+
+// The sweep captures the render and not the page: the page master is 2.4x the
+// pixels, nothing derives a rung from it, and the pixel count is the whole cost
+// of a capture. A page master already on disk must survive a render-only sweep
+// all the same.
+func TestModeBookkeeping(t *testing.T) {
+	t.Run("an entry carrying only a render is not complete for a page request", func(t *testing.T) {
+		e := &Entry{Matched: MatchedRealm, Modes: map[string]string{"render": "master-render.webp"}}
+		if !hasModes(e, []Mode{ModeRender}) {
+			t.Error("a render-only entry is incomplete for a render request")
+		}
+		if hasModes(e, []Mode{ModePage}) {
+			t.Error("a render-only entry reads as complete for a page request")
+		}
+	})
+
+	t.Run("a directory page never has a render and must not re-capture forever", func(t *testing.T) {
+		// The selector chain resolved to the directory listing, so there is no
+		// render master and there never will be. Treating that as "incomplete"
+		// would re-capture the page on every single read.
+		e := &Entry{Matched: MatchedDirectory, Modes: map[string]string{"page": "master-page.webp"}}
+		if !hasModes(e, []Mode{ModeRender}) {
+			t.Error("a directory entry is reported as missing a render it cannot have")
+		}
+	})
+
+	t.Run("a render-only refresh keeps a page master already on disk", func(t *testing.T) {
+		e := &Entry{Modes: map[string]string{"page": "master-page.webp", "render": "master-render.webp"}}
+		got := union([]Mode{ModeRender}, capturedModes(e))
+		seen := map[Mode]bool{}
+		for _, m := range got {
+			if seen[m] {
+				t.Fatalf("union produced %v with a duplicate", got)
+			}
+			seen[m] = true
+		}
+		if !seen[ModeRender] || !seen[ModePage] {
+			t.Fatalf("union = %v, want both modes", got)
+		}
+	})
+}
+
+func TestServeAPageMasterThatWasNeverCapturedQueuesOneForItself(t *testing.T) {
+	svc, err := New(Config{Root: t.TempDir(), Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+	e := &Entry{
+		URL: "https://gno.land/r/gov/dao", Theme: ThemeLight,
+		Matched: MatchedRealm, State: StatusOK, Freshness: "f",
+		ProbedAt: time.Now().UTC(), Object: "deadbeefdeadbeef",
+		Modes: map[string]string{"render": "master-render.webp"},
+	}
+	if err := svc.Store().Put(e); err != nil {
+		t.Fatal(err)
+	}
+	rung, _ := RungByName("og", 1)
+	_, _, status := svc.Serve(e.URL, ThemeLight, ModePage, rung)
+	if status != 202 {
+		t.Fatalf("status = %d, want 202", status)
+	}
+	if n := len(svc.interactive); n != 1 {
+		t.Fatalf("queued %d jobs, want 1", n)
+	}
+}

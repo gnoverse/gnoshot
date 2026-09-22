@@ -15,17 +15,27 @@ type Encoded struct {
 	Bytes []byte
 }
 
-// EncodeMaster stores the master losslessly.
+// EncodeMaster stores a master, losslessly.
 //
 // Measured over 7 real render crops: lossless WebP is 577,732 bytes total
 // against 2,244,311 for Chrome's PNG (3.9x) and 1,075,240 for WebP q80 (1.9x).
 // A realm render is text on flat colour, which is the content class where
 // lossless entropy coding wins and a DCT codec spends its bits on ringing
 // around glyph edges.
-func EncodeMaster(img image.Image) ([]byte, error) {
+//
+// Lossy was tried for the page master, on the theory that nothing resamples it
+// so its quality matters less. It came out **larger**: 261,280 bytes at q90
+// against 150,064 lossless on the same /r/gov/dao page (2026-09-22). The rule
+// only inverts below native resolution, and a master is by definition at it.
+//
+// Encoder effort is not a lever either, measured on the same image: methods 1
+// through 6 all produce byte-identical output within 0.93 to 1.23 seconds, and
+// only method 0 differs, at 7.7x the bytes. The cost of a master is the pixel
+// count, which is why the sweep captures the render and not the page.
+func EncodeMaster(img image.Image, mode Mode) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := webp.Encode(&buf, img, webp.Options{Lossless: true, Method: 4}); err != nil {
-		return nil, fmt.Errorf("encode master: %w", err)
+		return nil, fmt.Errorf("encode %s master: %w", mode, err)
 	}
 	return buf.Bytes(), nil
 }
