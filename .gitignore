@@ -1,0 +1,4 @@
+/gnoshot
+/testdata/cache/
+*.webp
+!docs/**/*.webp
