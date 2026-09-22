@@ -165,8 +165,13 @@ func NewAllowlist(spec string) *Allowlist {
 	return a
 }
 
-// DefaultAllowHosts is the production set.
-const DefaultAllowHosts = "gno.land,test6.testnets.gno.land,staging.gno.land"
+// DefaultAllowHosts is the production set: mainnet and the two public networks
+// that currently serve a gnoweb.
+//
+// Verified 2026-09-22, all three answer 200 on /r/gov/dao. Retired stones are
+// not listed: test6.testnets.gno.land no longer resolves, and an allowlist
+// entry for a host that does not exist is a claim nobody will re-check.
+const DefaultAllowHosts = "gno.land,staging.gno.land,pearl.testnets.gno.land"
 
 // Check parses and validates a requested URL, returning it in normalised form.
 func (a *Allowlist) Check(raw string) (string, error) {
