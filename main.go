@@ -211,7 +211,7 @@ func cmdCapture(args []string) error {
 		return err
 	}
 	for mode, m := range res.Masters {
-		b, err := shot.EncodeMaster(m.Img)
+		b, err := shot.EncodeMaster(m.Img, mode)
 		if err != nil {
 			return err
 		}
