@@ -167,6 +167,14 @@ The probe that computes it is one HTTP GET, ~45 ms, against ~500 ms for
 Serving is stale-while-revalidate: a cached picture goes out immediately and the
 re-probe happens behind it. A reader never waits on Chrome.
 
+**Never `immutable`, and that is deliberate.** A caller pins `v=` to something
+about the page, typically a block height. The bytes also depend on the recipe
+here, which `v=` cannot see: change how a render is framed and every returning
+visitor keeps the old picture until their `v=` moves, which for a genesis
+package nobody has ever called is never. `max-age` plus
+`stale-while-revalidate` keeps the paint instant and lets the ETag answer 304
+behind it.
+
 A transient upstream error never overwrites a good picture. The realm was fine a
 minute ago and will be again, and an error tile in place of a slightly old
 screenshot is the worse answer.

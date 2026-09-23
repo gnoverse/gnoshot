@@ -657,3 +657,46 @@ func TestFramePaddingIsAppliedToTheElement(t *testing.T) {
 		t.Error("the resolve script sets a width on the matched element")
 	}
 }
+
+// Never `immutable`.
+//
+// It would be right if v= covered everything that decides the bytes, and it
+// does not: a caller pins v= to something about the page, and the picture also
+// depends on the recipe here. Change the framing and a returning visitor keeps
+// the old picture until their v= moves, which for a genesis package nobody has
+// ever called is never.
+func TestServeDoesNotPromiseAnImmutableImage(t *testing.T) {
+	svc, err := New(Config{Root: t.TempDir(), Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+	e := &Entry{
+		URL: "https://gno.land/r/gov/dao", Theme: ThemeLight,
+		Matched: MatchedStatus, State: StatusNotFound, Freshness: "f",
+		ProbedAt: time.Now().UTC(),
+	}
+	if err := svc.Store().Put(e); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	NewServer(svc, "").Routes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/shot?url=" + e.URL + "&v=12345")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	cc := resp.Header.Get("Cache-Control")
+	if strings.Contains(cc, "immutable") {
+		t.Fatalf("Cache-Control = %q, which promises a picture can never change", cc)
+	}
+	// Still cached hard, and still revalidating behind the paint.
+	for _, want := range []string{"max-age=", "stale-while-revalidate="} {
+		if !strings.Contains(cc, want) {
+			t.Errorf("Cache-Control = %q, missing %q", cc, want)
+		}
+	}
+}
