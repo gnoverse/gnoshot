@@ -51,19 +51,41 @@ var resolveJS = func() string {
 		}
 		fmt.Fprintf(&sb, "[%q,%q]", c.Sel, string(c.Matched))
 	}
-	sb.WriteString(`];
+	fmt.Fprintf(&sb, `];
+	  const PAD = %d;
 	  for (const [sel, matched] of chain) {
 	    const e = document.querySelector(sel);
 	    if (!e) continue;
-	    const r = e.getBoundingClientRect();
+	    let r = e.getBoundingClientRect();
 	    if (r.width <= 0 || r.height <= 0) continue;
+	    // Frame the render before photographing it.
+	    //
+	    // The crop is the element's own box, so without this the realm's first
+	    // heading is glued to the pixel at 0,0 and the last line runs off the
+	    // bottom edge. Padding the element grows that box, so the breathing
+	    // room lands inside the crop rather than being cropped away.
+	    //
+	    // Padding only, never a width. Widening the element to fill the frame
+	    // was the obvious next step and it is wrong: gnoweb lays the realm view
+	    // beside an "On this page" sidebar, so a wider box does not gain empty
+	    // space, it grows over the neighbour and photographs half a table of
+	    // contents down the right edge. Verified 2026-09-23 on /r/gov/dao.
+	    e.style.boxSizing = 'content-box';
+	    e.style.padding = PAD + 'px';
+	    // The page paints on its own background, and the element usually has
+	    // none: without this the new padding is transparent and the crop shows
+	    // whatever is behind it.
+	    const bg = getComputedStyle(document.body).backgroundColor;
+	    if (bg && bg !== 'rgba(0, 0, 0, 0)') e.style.backgroundColor = bg;
+	    r = e.getBoundingClientRect();
 	    return {
 	      matched, selector: sel,
 	      x: r.x + window.scrollX, y: r.y + window.scrollY,
 	      w: r.width, h: r.height,
 	      doc: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight),
 	    };
-	  }
+	  }`, FramePadding)
+	sb.WriteString(`
 	  return {
 	    matched: "status", selector: "",
 	    x: 0, y: 0, w: 0, h: 0,
@@ -72,6 +94,22 @@ var resolveJS = func() string {
 	})()`)
 	return sb.String()
 }()
+
+// FramePadding is the breathing room added around a render before it is
+// photographed, in CSS pixels.
+//
+// The crop is the matched element's own bounding box, so anything not inside
+// that box is not in the picture. Padding the element is what puts margin in
+// the frame rather than around it.
+const FramePadding = 28
+
+// RenderVersion changes whenever the capture recipe does.
+//
+// The cache key is a hash of the gnoweb response, which answers "has the page
+// changed" and not "would we photograph it differently today". Without this, a
+// change to the framing leaves every already-captured realm showing the old
+// one, because the page did not move. Bump it when the recipe moves.
+const RenderVersion = 2
 
 // Probe is the cheap half of a capture: one HTTP GET that answers both "has
 // anything changed" and "is this even a page worth photographing".
@@ -111,8 +149,13 @@ func DoProbe(ctx context.Context, client *http.Client, pageURL string) (*Probe, 
 	if err != nil {
 		return nil, err
 	}
-	sum := sha256.Sum256(body)
-	p := &Probe{Status: resp.StatusCode, Freshness: hex.EncodeToString(sum[:]), Body: body}
+	// The recipe is part of the freshness, so changing how a page is framed
+	// invalidates every capture taken the old way.
+	h := sha256.New()
+	fmt.Fprintf(h, "v%d\n", RenderVersion)
+	h.Write(body)
+	sum := h.Sum(nil)
+	p := &Probe{Status: resp.StatusCode, Freshness: hex.EncodeToString(sum), Body: body}
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		p.State = StatusOK

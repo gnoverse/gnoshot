@@ -91,6 +91,26 @@ Three things that look like details and are not:
   and the first gets a 5-minute negative TTL because it flips to a real render
   with no request from us.
 
+## Framing
+
+The crop is the matched element's own bounding box, which means anything not
+inside that box is not in the picture. A render captured raw has its first
+heading glued to the pixel at 0,0 and its last line running off the edge.
+
+So the element is **padded before it is measured**, and the breathing room
+lands inside the crop rather than around it.
+
+Padding only, never a width. Widening the element to fill a 16:9 frame is the
+obvious next step and it is wrong: gnoweb lays the realm view beside an "On
+this page" sidebar, so a wider box does not gain empty space, it grows over the
+neighbour and photographs half a table of contents down the right edge.
+
+**Changing any of this bumps `RenderVersion`**, which is part of the cache key.
+The key is otherwise a hash of the gnoweb response, and that answers "has the
+page changed" rather than "would we photograph it differently today". Without
+the bump, every already-captured realm keeps the old framing forever, because
+the page did not move.
+
 ## The ladder
 
 Capture once at device scale factor 2, derive everything else. Re-rendering per

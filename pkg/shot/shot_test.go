@@ -2,6 +2,8 @@ package shot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"image"
 	"image/color"
 	"io"
@@ -600,5 +602,58 @@ func TestServeAPageMasterThatWasNeverCapturedQueuesOneForItself(t *testing.T) {
 	}
 	if n := len(svc.interactive); n != 1 {
 		t.Fatalf("queued %d jobs, want 1", n)
+	}
+}
+
+// The freshness hash answers "would we serve different bytes", not just "has
+// the page changed". A change to how a render is framed produces a different
+// picture from an identical page, so the recipe version is part of the key;
+// without it, every already-captured realm keeps the old framing forever
+// because the page did not move.
+func TestFreshnessCoversTheRenderRecipe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>unchanged</html>"))
+	}))
+	defer srv.Close()
+
+	p, err := DoProbe(context.Background(), srv.Client(), srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The hash of the body alone, which is what this used to be.
+	bare := sha256.Sum256([]byte("<html>unchanged</html>"))
+	if p.Freshness == hex.EncodeToString(bare[:]) {
+		t.Fatal("freshness is the bare body hash, so a recipe change would not invalidate anything")
+	}
+	if len(p.Freshness) != 64 {
+		t.Fatalf("freshness = %q, want a sha256 hex digest", p.Freshness)
+	}
+}
+
+// Padding is added to the element, not around the crop, because the crop *is*
+// the element's box: anything outside it is not in the picture.
+func TestFramePaddingIsAppliedToTheElement(t *testing.T) {
+	if FramePadding <= 0 {
+		t.Fatal("no framing padding")
+	}
+	for _, want := range []string{
+		"e.style.padding = PAD + 'px'",
+		"getBoundingClientRect()",
+	} {
+		if !strings.Contains(resolveJS, want) {
+			t.Errorf("the resolve script does not %q", want)
+		}
+	}
+	// And the box is re-measured after the style is applied, or the clip is
+	// the size the element was before it was framed.
+	pad := strings.Index(resolveJS, "e.style.padding")
+	measure := strings.LastIndex(resolveJS, "r = e.getBoundingClientRect()")
+	if pad < 0 || measure < 0 || measure < pad {
+		t.Fatal("the element is measured before it is padded, so the clip misses the padding")
+	}
+	// Never a width: widening the realm view grows it over gnoweb's "On this
+	// page" sidebar and photographs half a table of contents.
+	if strings.Contains(resolveJS, "e.style.width") {
+		t.Error("the resolve script sets a width on the matched element")
 	}
 }
