@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"image"
 	"image/color"
 	"io"
@@ -15,7 +16,7 @@ import (
 )
 
 func TestAllowlistRefusesEverythingOffTheList(t *testing.T) {
-	a := NewAllowlist(DefaultAllowHosts)
+	a := NewAllowlist(DefaultAllowHosts, "adena.app")
 	tests := []struct {
 		name string
 		in   string
@@ -25,6 +26,7 @@ func TestAllowlistRefusesEverythingOffTheList(t *testing.T) {
 		{"path args kept", "https://gno.land/r/gnoland/blog:p/hello", "https://gno.land/r/gnoland/blog:p/hello"},
 		{"fragment dropped", "https://gno.land/r/gov/dao#x", "https://gno.land/r/gov/dao"},
 		{"bare host gets a slash", "https://gno.land", "https://gno.land/"},
+		{"site host passes too", "https://adena.app/", "https://adena.app/"},
 		{"other host", "https://evil.example/r/gov/dao", ""},
 		{"lookalike host", "https://gno.land.evil.example/", ""},
 		{"file scheme", "file:///etc/passwd", ""},
@@ -698,5 +700,82 @@ func TestServeDoesNotPromiseAnImmutableImage(t *testing.T) {
 		if !strings.Contains(cc, want) {
 			t.Errorf("Cache-Control = %q, missing %q", cc, want)
 		}
+	}
+}
+
+// The settle wait has two numbers and they are only meaningful against each
+// other and against the deadline. Both invariants are the kind a later tweak
+// breaks silently: the capture still succeeds, it just stops doing the thing
+// the numbers were chosen for.
+func TestSettleWindowsAreOrdered(t *testing.T) {
+	if settleQuiet >= settleCap {
+		// The cap would fire first on every page, so the quiesce would never
+		// decide anything and this would be a fixed sleep with extra steps.
+		t.Fatalf("settleQuiet %d must be shorter than settleCap %d", settleQuiet, settleCap)
+	}
+	// The cap is only the wait. Navigation, fonts, the resolve evaluate and one
+	// screenshot per mode all come out of the same deadline, and a page master
+	// of a tall site is the slowest of those.
+	if budget := CaptureDeadline - time.Duration(settleCap)*time.Millisecond; budget < 20*time.Second {
+		t.Fatalf("settleCap %dms leaves only %s of the %s deadline for the capture itself",
+			settleCap, budget, CaptureDeadline)
+	}
+}
+
+// The generated JS has to carry both numbers, because they are formatted in
+// rather than referenced: a %d that lost its argument produces a script that
+// still runs and waits for the wrong thing, or forever.
+func TestSettleJSCarriesBothWindows(t *testing.T) {
+	for _, want := range []string{
+		fmt.Sprintf("setTimeout(done, %d)", settleCap),
+		fmt.Sprintf("setTimeout(done, %d)", settleQuiet),
+		"MutationObserver",
+		// Subtree and attributes both: a spinner that swaps one class on one
+		// node is a page still deciding what it is, and a childList-only
+		// observer would call that quiet.
+		"subtree: true",
+		"attributes: true",
+	} {
+		if !strings.Contains(settleJS, want) {
+			t.Errorf("settleJS is missing %q", want)
+		}
+	}
+}
+
+// The two lists are two kinds of page, not one list split in half, and every
+// consumer downstream branches on the difference: a site host skips the
+// selector chain, is photographed whole, and is never classified as an error
+// page for failing to look like gnoweb.
+func TestAllowlistTellsAGnowebHostFromASite(t *testing.T) {
+	a := NewAllowlist("gno.land", "adena.app,kourt.xyz")
+	for _, tt := range []struct {
+		url  string
+		site bool
+	}{
+		{"https://gno.land/r/gov/dao", false},
+		{"https://adena.app/", true},
+		{"https://KOURT.xyz/anything", true},
+		{"https://evil.example/", false},
+		{"not a url at all", false},
+	} {
+		if got := a.IsSite(tt.url); got != tt.site {
+			t.Errorf("IsSite(%q) = %v, want %v", tt.url, got, tt.site)
+		}
+	}
+}
+
+// A host in both lists is a configuration mistake whose failure mode is quiet:
+// the picture silently gets worse, because the whole-page path replaces a crop
+// the selector chain would have found. gnoweb wins.
+func TestAHostInBothListsStaysGnoweb(t *testing.T) {
+	a := NewAllowlist("gno.land,staging.gno.land", "gno.land,adena.app")
+	if a.IsSite("https://gno.land/r/gov/dao") {
+		t.Error("gno.land is listed in both and came out a site host")
+	}
+	if !a.IsSite("https://adena.app/") {
+		t.Error("adena.app is only a site host and came out a gnoweb one")
+	}
+	if _, err := a.Check("https://gno.land/r/gov/dao"); err != nil {
+		t.Errorf("a host in both lists must still be allowed: %v", err)
 	}
 }

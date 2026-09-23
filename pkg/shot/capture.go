@@ -157,7 +157,49 @@ func (b *Browser) Close() {
 //
 // The probe has already decided whether the page is worth visiting; this is
 // only ever called for a page that answered 200.
-func (b *Browser) Capture(ctx context.Context, pageURL string, theme Theme, modes []Mode) (*Result, error) {
+// settleJS resolves once the DOM has stopped changing, or at the cap.
+//
+// fonts.ready plus two frames is enough for gnoweb, which server-renders and
+// then hydrates. It is not enough for a page that paints nothing until its
+// JavaScript has fetched and rendered, and those are pages this service is now
+// also asked to photograph. Measured 2026-09-23 in page mode, all three
+// answering 200 with real content in a browser: gnoswap.io came out a
+// 228-byte blank, gnolove.world and kourt.xyz came out as their own loading
+// spinners. A confident picture of a spinner is worse than no picture, because
+// nothing downstream can tell the two apart.
+//
+// A MutationObserver quiesce rather than a fixed sleep or network idle:
+//
+//   - A fixed sleep taxes every gnoweb capture for the sake of the handful that
+//     need it, and the sweep runs over every realm on the chain. This returns
+//     in one quiet window on a page that was already done.
+//   - Network idle never arrives on a page holding a websocket or a poll open,
+//     and several of these do.
+//
+// Quiet means the whole document, subtree and attributes included, because a
+// spinner that swaps one class is a page still deciding what it is. The cap
+// bounds the worst case, a page that never stops animating: it fires and the
+// capture proceeds, which is exactly what happened before this existed.
+const (
+	settleQuiet = 400  // ms without a mutation that counts as done
+	settleCap   = 2500 // ms after which we photograph whatever is there
+)
+
+var settleJS = fmt.Sprintf(`new Promise(resolve => {
+  let timer = null;
+  const done = () => { obs.disconnect(); clearTimeout(timer); clearTimeout(cap); resolve(true); };
+  const cap = setTimeout(done, %d);
+  const bump = () => { clearTimeout(timer); timer = setTimeout(done, %d); };
+  const obs = new MutationObserver(bump);
+  obs.observe(document.documentElement, {childList: true, subtree: true, attributes: true, characterData: true});
+  bump();
+})`, settleCap, settleQuiet)
+
+// Capture photographs one page.
+//
+// site says the URL is on a host that does not serve gnoweb, so the selector
+// chain is skipped and the whole document is the picture. See docHeightJS.
+func (b *Browser) Capture(ctx context.Context, pageURL string, theme Theme, modes []Mode, site bool) (*Result, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -197,6 +239,10 @@ func (b *Browser) Capture(ctx context.Context, pageURL string, theme Theme, mode
 	awaitPromise := func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 		return p.WithAwaitPromise(true)
 	}
+	probeScript := resolveJS
+	if site {
+		probeScript = docHeightJS
+	}
 	tasks := chromedp.Tasks{
 		// Device metrics stay at scale 1 and the master's 2x comes from the
 		// screenshot clip. Setting both is how you silently get a 4x image.
@@ -214,7 +260,10 @@ func (b *Browser) Capture(ctx context.Context, pageURL string, theme Theme, mode
 		chromedp.Evaluate(
 			`new Promise(r => document.fonts.ready.then(() => requestAnimationFrame(() => requestAnimationFrame(() => r(true)))))`,
 			nil, awaitPromise),
-		chromedp.Evaluate(resolveJS, &res),
+		// And then wait for the DOM to stop moving, which fonts.ready does not
+		// imply on a page that renders itself in JavaScript.
+		chromedp.Evaluate(settleJS, nil, awaitPromise),
+		chromedp.Evaluate(probeScript, &res),
 	}
 	if err := chromedp.Run(tab, tasks); err != nil {
 		return nil, fmt.Errorf("load %s: %w", pageURL, err)
@@ -231,7 +280,11 @@ func (b *Browser) Capture(ctx context.Context, pageURL string, theme Theme, mode
 		var clip Box
 		switch m {
 		case ModeRender:
-			if out.Matched == MatchedStatus {
+			// Nothing to crop to on either: an error page has no render, and a
+			// site host never ran the chain that would have found one. Both
+			// are answered by the page master, which the ladder then derives
+			// every rung from.
+			if out.Matched == MatchedStatus || out.Matched == MatchedSite {
 				continue
 			}
 			clip = out.Box

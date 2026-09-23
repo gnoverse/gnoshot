@@ -95,6 +95,18 @@ var resolveJS = func() string {
 	return sb.String()
 }()
 
+// docHeightJS is what runs instead of the selector chain on a site host.
+//
+// The chain is gnoweb's own class names and it also *mutates* what it matches,
+// padding the element so the crop has breathing room. Neither is right on
+// somebody else's page: the class names mean nothing there, and rewriting a
+// third-party document before photographing it would be photographing
+// something that never existed. All a whole-page capture needs is how tall the
+// document is.
+const docHeightJS = `(() => ({matched: "site", selector: "", x: 0, y: 0, w: 0, h: 0,
+  doc: Math.max(document.body ? document.body.scrollHeight : 0,
+                document.documentElement.scrollHeight)}))()`
+
 // FramePadding is the breathing room added around a render before it is
 // photographed, in CSS pixels.
 //
@@ -194,18 +206,45 @@ func DefaultProbeClient() *http.Client {
 // is a 400 before any work happens.
 type Allowlist struct {
 	hosts map[string]bool
+	sites map[string]bool
 }
 
-// NewAllowlist builds an allowlist from a comma-separated host list.
-func NewAllowlist(spec string) *Allowlist {
-	a := &Allowlist{hosts: map[string]bool{}}
-	for _, h := range strings.Split(spec, ",") {
-		h = strings.ToLower(strings.TrimSpace(h))
-		if h != "" {
-			a.hosts[h] = true
+// NewAllowlist builds an allowlist from two comma-separated host lists.
+//
+// The split is not cosmetic. A gnoweb host is photographed through the selector
+// chain, which is a set of gnoweb's own class names; a site host has no such
+// structure and is photographed whole. Running the chain against a host it was
+// never written for is how every third-party app came out classified as an
+// error page. Keeping the two lists apart means the operator states which kind
+// of page a host serves, rather than the service guessing from what it found.
+func NewAllowlist(spec, siteSpec string) *Allowlist {
+	a := &Allowlist{hosts: map[string]bool{}, sites: map[string]bool{}}
+	fill := func(dst map[string]bool, spec string) {
+		for _, h := range strings.Split(spec, ",") {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h != "" {
+				dst[h] = true
+			}
 		}
 	}
+	fill(a.hosts, spec)
+	fill(a.sites, siteSpec)
+	// A host named in both is a configuration mistake with a quiet failure
+	// mode, so gnoweb wins and the site entry is dropped: the selector chain
+	// produces a better picture wherever it applies.
+	for h := range a.hosts {
+		delete(a.sites, h)
+	}
 	return a
+}
+
+// IsSite reports whether a URL is on a host photographed whole.
+func (a *Allowlist) IsSite(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return a.sites[strings.ToLower(u.Hostname())]
 }
 
 // DefaultAllowHosts is the production set: mainnet and the two public networks
@@ -225,7 +264,8 @@ func (a *Allowlist) Check(raw string) (string, error) {
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return "", fmt.Errorf("scheme %q not allowed", u.Scheme)
 	}
-	if !a.hosts[strings.ToLower(u.Hostname())] {
+	h := strings.ToLower(u.Hostname())
+	if !a.hosts[h] && !a.sites[h] {
 		return "", fmt.Errorf("host %q not on the allowlist", u.Hostname())
 	}
 	u.Fragment = ""

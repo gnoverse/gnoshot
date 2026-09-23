@@ -13,7 +13,8 @@ import (
 type Config struct {
 	Root         string        // storage root
 	Workers      int           // browsers, each ~1.3 GB of RSS
-	AllowHosts   string        // comma-separated allowlist
+	AllowHosts   string        // comma-separated gnoweb host allowlist
+	AllowSites   string        // comma-separated non-gnoweb host allowlist
 	RefreshAfter time.Duration // how old a probe may be before a read re-probes
 	SweepEvery   time.Duration // background sweep interval, 0 to disable
 	SweepSource  string        // mygnoscan-compatible base URL to enumerate paths from
@@ -90,7 +91,7 @@ func New(cfg Config) (*Service, error) {
 	return &Service{
 		cfg:         cfg,
 		store:       st,
-		allow:       NewAllowlist(cfg.AllowHosts),
+		allow:       NewAllowlist(cfg.AllowHosts, cfg.AllowSites),
 		probe:       DefaultProbeClient(),
 		interactive: make(chan job, cfg.QueueDepth),
 		background:  make(chan job, cfg.QueueDepth),
@@ -202,8 +203,16 @@ func (s *Service) done(j job) {
 // is the whole pipeline, and the CLI runs the identical code path so the
 // service is not the only way to reproduce a capture.
 func (s *Service) Refresh(ctx context.Context, br *Browser, pageURL string, theme Theme, modes ...Mode) error {
+	// Whether this is gnoweb is a property of the host, not of the request, so
+	// it is read here rather than carried through the queue: a caller asking
+	// for a render of a site host is asking for something that does not exist,
+	// and the honest answer is the page, not an error.
+	site := s.allow.IsSite(pageURL)
 	if len(modes) == 0 {
 		modes = []Mode{ModeRender}
+	}
+	if site {
+		modes = []Mode{ModePage}
 	}
 	p, err := DoProbe(ctx, s.probe, pageURL)
 	if err != nil {
@@ -244,7 +253,7 @@ func (s *Service) Refresh(ctx context.Context, br *Browser, pageURL string, them
 	if prev != nil && prev.Freshness == p.Freshness {
 		modes = union(modes, capturedModes(prev))
 	}
-	res, err := br.Capture(ctx, pageURL, theme, modes)
+	res, err := br.Capture(ctx, pageURL, theme, modes, site)
 	if err != nil {
 		return fmt.Errorf("capture: %w", err)
 	}

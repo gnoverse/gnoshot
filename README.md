@@ -181,10 +181,30 @@ screenshot is the worse answer.
 
 ## Safety
 
-`?url=` is restricted to an allowlist (`-allow`, default `gno.land` and the
-testnets). An unbounded one is an open proxy and a way to spend this box's CPU
-on headless Chrome. `POST /invalidate` needs a bearer token and is refused
-outright when none is configured.
+`?url=` is restricted to an allowlist. An unbounded one is an open proxy and a
+way to spend this box's CPU on headless Chrome. `POST /invalidate` needs a
+bearer token and is refused outright when none is configured.
+
+There are two lists, and the split says what kind of page a host serves:
+
+| flag | for | how it is photographed |
+|---|---|---|
+| `-allow` | gnoweb hosts (default `gno.land` and the testnets) | through the selector chain, cropped to the realm's own render |
+| `-allow-site` | anything else, empty by default | whole page, no selector chain |
+
+The second exists because "no selector in the chain matched" means two
+different things depending on where you are. On gnoweb it means an error page,
+which is what `matched=status` records and why a placeholder tile is served
+instead of a screenshot. On somebody else's app it means nothing at all: the
+chain is gnoweb's own class names. A site host is recorded as `matched=site`,
+is never demoted to a status tile for failing to look like gnoweb, and the
+ladder is derived from its page master, so `size=thumb` and `size=og` answer
+normally.
+
+Keeping the two apart is deliberate: the operator states which kind a host is,
+rather than the service guessing from what it found. A host named in both is a
+configuration mistake and gnoweb wins, because the selector chain produces a
+better picture wherever it applies.
 
 ## Cost
 

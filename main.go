@@ -100,7 +100,8 @@ func cmdServe(args []string) error {
 	addr := fs.String("addr", env("GNOSHOT_ADDR", ":8890"), "listen address")
 	root := fs.String("root", defaultRoot(), "storage root")
 	workers := fs.Int("workers", 2, "capture workers; each holds a browser at roughly 1.3 GB")
-	allow := fs.String("allow", shot.DefaultAllowHosts, "comma-separated host allowlist")
+	allow := fs.String("allow", shot.DefaultAllowHosts, "comma-separated gnoweb host allowlist")
+	allowSites := fs.String("allow-site", "", "comma-separated allowlist of non-gnoweb hosts, photographed whole rather than through the selector chain")
 	base := fs.String("gnoweb", env("GNOSHOT_GNOWEB", "https://gno.land"), "gnoweb base URL for the sweep")
 	source := fs.String("source", env("GNOSHOT_SOURCE", ""), "mygnoscan base URL to enumerate paths from; empty disables the corpus sweep")
 	network := fs.String("network", env("GNOSHOT_NETWORK", "mainnet"), "network id to enumerate")
@@ -110,7 +111,7 @@ func cmdServe(args []string) error {
 	fs.Parse(args)
 
 	svc, err := shot.New(shot.Config{
-		Root: *root, Workers: *workers, AllowHosts: *allow,
+		Root: *root, Workers: *workers, AllowHosts: *allow, AllowSites: *allowSites,
 		RefreshAfter: *refresh, SweepEvery: *sweep, SweepSource: *source,
 		SweepNetwork: *network, GnowebBase: *base,
 	})
@@ -148,6 +149,7 @@ func cmdCapture(args []string) error {
 	out := fs.String("out", ".", "output directory")
 	theme := fs.String("theme", "light", "light|dark")
 	modes := fs.String("mode", "both", "page|render|both")
+	site := fs.Bool("site", false, "the URL is not gnoweb: photograph the whole page, skip the selector chain")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: gnoshot capture [-out DIR] [-theme light|dark] [-mode page|render|both] <url>")
@@ -201,7 +203,7 @@ func cmdCapture(args []string) error {
 	}
 	defer br.Close()
 	t0 := time.Now()
-	res, err := br.Capture(ctx, pageURL, th, want)
+	res, err := br.Capture(ctx, pageURL, th, want, *site)
 	if err != nil {
 		return err
 	}
@@ -271,7 +273,9 @@ func cmdResolve(args []string) error {
 			continue
 		}
 		// An empty mode list resolves the chain and captures nothing.
-		res, err := br.Capture(ctx, u, th, nil)
+		// resolve is about the selector chain by definition, so it never asks
+		// for the whole-page path.
+		res, err := br.Capture(ctx, u, th, nil, false)
 		if err != nil {
 			fmt.Printf("%-4d %-9s %-26s %-11s %s\n", p.Status, "err", "-", "-", u)
 			continue
