@@ -51,6 +51,14 @@ const (
 	// MatchedStatus is an error, a 404, or a package submitted and not yet
 	// enabled. Never present one of these as a picture of a working realm.
 	MatchedStatus Matched = "status"
+	// MatchedSite is a page on a host that is not gnoweb, photographed whole
+	// because there is no realm render to crop to.
+	//
+	// It exists so that "no selector in the chain matched" stops meaning "this
+	// is an error page". On gnoweb those are the same statement; on adena.app
+	// they are not, and collapsing them served a placeholder tile for every
+	// working third-party app.
+	MatchedSite Matched = "site"
 )
 
 // Status refines MatchedStatus. All three render the same full-screen box and
